@@ -11,23 +11,71 @@ ChatGPT ──HTTPS──▶ reverse proxy / tunnel ──▶ odoo-gpt-mcp ─�
 
 ## Tools
 
+**Catalogs**: what exists and what the connected user may open:
+
+| Tool | Lists | Filtered by privilege via |
+|---|---|---|
+| `list_reports` | **Company reports** (official definitions, see below), **Odoo analysis views** (every app's *Reporting* menu, with model, domain and context), **printable documents** (PDF reports per model) | report model readable; analysis menus as Odoo shows them; PDF reports' group restrictions + model access |
+| `list_modules` | Installed apps, as on the user's Odoo home screen | apps whose menu the user can see |
+| `list_menus` | Every menu the user can open, with the model, domain and context behind it | Odoo's own menu visibility (groups + model access) |
+| `list_models` | Models (tables) by keyword | `check_access_rights('read')` per model |
+
+**Queries:**
+
 | Tool | Purpose | Odoo call |
 |---|---|---|
-| `odoo_context` | Connected user, companies, currencies, today's date in the user's timezone | `res.users`, `res.company` |
-| `list_models` | Find models by keyword (`invoice` → `account.move`, `account.invoice.report`, …) | `ir.model` |
+| `run_report` | Run a company report for a period, grouped by its dimensions, with optional extra filters | `read_group` / `search_read` |
+| `odoo_context` | Connected user, privileges (Odoo groups), companies, currencies, today in the user's timezone | `res.users`, `res.groups`, `res.company` |
 | `describe_model` | Fields, types, relations, selection values, stored or not | `fields_get` |
 | `search_records` | Individual records with domain, fields, order, paging | `search_read` + `search_count` |
 | `count_records` | "How many …" | `search_count` |
 | `aggregate_records` | Totals/averages grouped by period, salesperson, customer, … | `read_group` |
 
 All tools are annotated read-only, and the server never calls `create`, `write`, `unlink` or action methods.
-ChatGPT is told to prefer Odoo's reporting models (`sale.report`, `account.invoice.report`, `purchase.report`,
-`stock.quant`, …) and `aggregate_records` over downloading rows.
+
+### How a vague question is answered
+
+For *"give me last month's report"*, ChatGPT is instructed to:
+
+1. call `odoo_context` (today's date, timezone, privileges),
+2. call `list_reports`; if the request is vague, offer the company reports and Odoo analysis views the user has
+   instead of guessing; if one clearly matches, `run_report` it and quote its notes,
+3. fall back to an Odoo analysis view (its model + domain via `aggregate_records`), then to ad-hoc queries.
+
+## Company report catalog
+
+[internal/reports/default.yaml](internal/reports/default.yaml) defines the official reports: model, always-applied
+filters, measures, dimensions, notes. The built-in set covers Odoo 16 Community apps:
+
+| Report | Model | Default view |
+|---|---|---|
+| `sales`, `quotations` | `sale.report` | confirmed sales by month; open quotations by salesperson |
+| `invoiced_revenue`, `vendor_bills` | `account.invoice.report` | posted customer invoices / vendor bills by month |
+| `receivables`, `overdue_invoices`, `payables` | `account.move` | amount due by customer; overdue invoice list; amount owed by vendor |
+| `purchases` | `purchase.report` | confirmed purchases by month |
+| `stock_on_hand` | `stock.quant` | quantity by product in internal locations |
+| `pipeline`, `leads` | `crm.lead` | opportunities by stage; new leads by month |
+| `expenses`, `time_off` | `hr.expense`, `hr.leave` | approved expenses by month; validated leave by type |
+| `pos_sales` | `report.pos.order` | POS sales by month |
+| `timesheets` | `account.analytic.line` | hours by project |
+
+**These are starting definitions. Have finance and sales confirm the filters** (which states count, taxed or untaxed,
+which journals), because ChatGPT treats them as the company's official numbers.
+
+To customise, copy the file, edit it and set `REPORTS_FILE` (see the compose example). Each report is checked against
+the live database at startup; a report whose module isn't installed or whose field names don't match is skipped and
+logged, e.g.
+
+```
+level=WARN msg="report unavailable" report=pos_sales reason="model report.pos.order is not available (module not installed?)"
+level=INFO msg="report catalog loaded" available=sales,quotations,invoiced_revenue,... total=15
+```
 
 ## What ChatGPT can and cannot see
 
 1. **Odoo access rights are the real boundary.** Every call runs as one Odoo service user, so ChatGPT sees exactly
    what that user's groups and record rules allow, and **everyone who uses the connector sees the same data**.
+   All catalogs are filtered to that user's privileges, and group/access changes in Odoo show up within 10 minutes.
 2. **Blocked models** (default): `ir.*`, `base.*`, `bus.*`, `iap.*`, `auth.*`, `res.users.apikeys*`, `res.users.log`,
    `res.config*`, `res.partner.bank`, `fetchmail.*`, `payment.token`, `payment.provider`, `mail.mail`, `mail.alias*`.
    Narrow further with `ODOO_ALLOWED_MODELS`.
@@ -70,6 +118,7 @@ openssl rand -hex 32   # → MCP_ACCESS_TOKEN
 | `ODOO_DEFAULT_LIMIT` / `ODOO_MAX_LIMIT` | | `80` / `500` | rows/groups per call |
 | `ODOO_MAX_TEXT_LENGTH` | | `500` | |
 | `ODOO_TIMEOUT_SECONDS` | | `60` | per Odoo request |
+| `REPORTS_FILE` | | built-in | path to a company report catalog YAML |
 
 ### 3. Run
 
@@ -106,6 +155,7 @@ Then ask, for example:
 - *"Using Odoo, show sales revenue per month this year, by salesperson."*
 - *"Which customers have overdue invoices, and how much does each owe?"*
 - *"How many leads were created last month per source?"*
+- *"What reports can I get?"* (lists the company reports and Odoo analysis views available to the connected user)
 
 ## Security notes
 
@@ -126,7 +176,8 @@ cmd/odoo-gpt-mcp/   entrypoint, HTTP routing, Host check
 internal/config/    env parsing
 internal/odoo/      Odoo 16 /jsonrpc client
 internal/policy/    model/field filtering, domain validation, result shaping
-internal/tools/     MCP tool definitions and server instructions
+internal/reports/   company report catalog (default.yaml) and its validation
+internal/tools/     MCP tools: catalogs, run_report, ad-hoc queries, privilege checks
 ```
 
 Tests use a fake Odoo, so no Odoo instance is needed.

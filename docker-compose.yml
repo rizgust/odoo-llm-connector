@@ -4,4 +4,8 @@ services:
     env_file: .env
     ports:
       - "127.0.0.1:8000:8000"  # put an HTTPS reverse proxy or tunnel in front; don't expose plain HTTP
+    # To use your own report definitions: copy internal/reports/default.yaml to ./reports.yaml,
+    # uncomment below, and set REPORTS_FILE=/config/reports.yaml in .env
+    # volumes:
+    #   - ./reports.yaml:/config/reports.yaml:ro
     restart: unless-stopped
