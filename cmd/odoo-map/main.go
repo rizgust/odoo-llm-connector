@@ -278,9 +278,19 @@ func (m *mapper) customModels(res *result) {
 			readable := m.exec(str(r["model"]), "search_count", []any{[]any{}}, nil, &n) == nil
 			res.CustomModels = append(res.CustomModels, map[string]any{
 				"model": r["model"], "label": r["name"], "modules": r["modules"], "studio": studio,
+				"kind":     map[bool]string{true: "new model", false: "standard model extended"}[!slices.ContainsFunc(mods, isOdooModule(res))],
 				"readable": readable, "records": n,
 			})
 		}
+	}
+}
+
+// isOdooModule reports whether a module name belongs to an Odoo S.A. module.
+func isOdooModule(res *result) func(string) bool {
+	return func(name string) bool {
+		return slices.ContainsFunc(res.Modules, func(m moduleRow) bool {
+			return m.Name == name && !slices.ContainsFunc(res.CustomModules, func(c moduleRow) bool { return c.Name == name })
+		})
 	}
 }
 

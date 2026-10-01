@@ -59,6 +59,7 @@ func run(log *slog.Logger) error {
 	server := tools.NewServer(client, tools.Options{
 		Policy:       pol,
 		Catalog:      catalog,
+		KeepWarm:     true,
 		DefaultLimit: cfg.DefaultLimit,
 		MaxLimit:     cfg.MaxLimit,
 	}, version)
