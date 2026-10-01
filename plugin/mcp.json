@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "nuanu-odoo": {
+      "type": "streamable-http",
+      "url": "https://odoo.mcp.nuanu.com/mcp"
+    }
+  }
+}

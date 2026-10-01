@@ -4,3 +4,4 @@
 .env
 /mapping/
 /deploy/odoo-gpt-mcp
+/dist/

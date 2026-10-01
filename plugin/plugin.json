@@ -1,0 +1,29 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "nuanu-odoo",
+  "version": "1.0.0",
+  "description": "Ask for Nuanu's Odoo reports in plain language: sales, POS, invoices, receivables, purchases, stock, expenses and costs per business area. Read-only, with each person's own Odoo permissions.",
+  "keywords": [
+    "odoo",
+    "erp",
+    "reports",
+    "finance",
+    "pos",
+    "nuanu"
+  ],
+  "author": {
+    "name": "Rizky Gustiansyah",
+    "email": "rizkygustiansyah@nuanu.com"
+  },
+  "homepage": "https://claude.ai/artifact/Xs2ETAPTmVr7o83pC3JHEv",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Nuanu Odoo",
+        "category": "Productivity",
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/logo.png"
+      }
+    }
+  }
+}

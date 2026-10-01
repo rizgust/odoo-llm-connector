@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__odoo__odoo_context",
+      "mcp__odoo__list_modules",
+      "mcp__odoo__list_reports"
+    ]
+  }
+}

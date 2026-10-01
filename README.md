@@ -176,6 +176,19 @@ view, report-model fields and status values in use, documents per company, and w
 metadata and counts only, no business records. Output goes to `mapping/` (git-ignored). Use it to adapt
 `config/reports.yaml` after Odoo upgrades or new modules.
 
+## ChatGPT plugin
+
+[plugin/](plugin/) packages the connector as the **Nuanu Odoo** ChatGPT plugin (also usable in Codex): the
+manifest, a pointer to `https://odoo.mcp.nuanu.com/mcp`, the `odoo-reports` skill (how to answer report
+questions), and the icon. The server needs no changes; sign-in still goes through its OAuth page.
+
+```sh
+deploy/build-plugin.sh   # → dist/nuanu-odoo-plugin-<version>.zip
+```
+
+A workspace admin uploads the ZIP in ChatGPT, tests it, then publishes it under **Plugins → Personal → Publish**
+to the workspace roles that should have it. Bump `version` in `plugin/plugin.json` for each new upload.
+
 ## Development
 
 ```sh
