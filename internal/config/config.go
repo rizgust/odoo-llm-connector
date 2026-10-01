@@ -50,6 +50,9 @@ type Config struct {
 	DefaultLimit  int
 	MaxLimit      int
 	MaxTextLength int
+
+	// ReportsFile is a YAML report catalog; empty = built-in default.
+	ReportsFile string
 }
 
 func FromEnv() (*Config, error) {
@@ -80,6 +83,7 @@ func FromEnv() (*Config, error) {
 
 	cfg.ListenAddr = envOr("MCP_LISTEN_ADDR", ":8000")
 	cfg.PublicHost = os.Getenv("MCP_PUBLIC_HOST")
+	cfg.ReportsFile = os.Getenv("REPORTS_FILE")
 	cfg.AllowedModels = csv(os.Getenv("ODOO_ALLOWED_MODELS"))
 	cfg.BlockedModels = DefaultBlockedModels
 	if v, ok := os.LookupEnv("ODOO_BLOCKED_MODELS"); ok {

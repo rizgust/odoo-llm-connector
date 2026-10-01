@@ -15,28 +15,36 @@ import (
 
 	"github.com/rizgust/odoo-gpt-mcp/internal/odoo"
 	"github.com/rizgust/odoo-gpt-mcp/internal/policy"
+	"github.com/rizgust/odoo-gpt-mcp/internal/reports"
 )
 
 const Instructions = `You are connected to the company's Odoo 16 ERP (read-only). Use it to answer business and reporting questions.
+Everything you see is limited to what the connected Odoo user is allowed to access; catalogs only list what that user can open.
 
-Workflow:
-1. If you don't know which model holds the data, call list_models with a keyword (e.g. "sale", "invoice", "stock").
-2. Call describe_model before querying a model you haven't inspected, to get exact field names and selection values.
-3. For totals, trends and breakdowns use aggregate_records (Odoo read_group) instead of downloading rows.
-   Prefer Odoo's reporting models when installed: sale.report, account.invoice.report, purchase.report,
-   stock.quant, stock.move.line, crm.lead, project.task, hr.leave.report, pos.order.report.
-4. Use search_records for lists of specific records, count_records for "how many".
-5. Call odoo_context once per conversation to learn today's date, timezone, companies and currencies.
+Start of a conversation: call odoo_context (today's date, timezone, companies, currencies, the user's privileges).
+
+When the user asks for "a report", a business metric, or doesn't name a module:
+1. Call list_reports. Company reports are the official definitions: if one matches, use run_report and quote its notes.
+   If the request is vague (e.g. "give me a report"), offer the matching company reports and Odoo analysis menus instead of guessing.
+2. If no company report fits, odoo_analysis_menus show the analysis views Odoo itself offers (model + domain + context).
+   Query that model with aggregate_records, translating the menu's Python domain into a JSON domain.
+3. list_modules shows which apps the user has; list_menus shows what each app contains, like browsing Odoo's menus.
+
+Ad-hoc questions:
+- list_models finds models by keyword; describe_model gives exact field names and selection values. Inspect before querying.
+- aggregate_records for totals and breakdowns (prefer *.report models); search_records for specific records; count_records for "how many".
 
 Odoo domain syntax: a list of [field, operator, value] terms, implicitly AND-ed; prefix-notation "|" and "!" for OR/NOT.
 Operators: = != > >= < <= like ilike "not ilike" in "not in" child_of. Dates are "YYYY-MM-DD", datetimes "YYYY-MM-DD HH:MM:SS" in UTC.
 Related fields can be traversed with dots, e.g. ["partner_id.country_id.code", "=", "ID"].
 Many2one values come back as [id, display_name]. Amounts on documents are in the document's currency unless the model
 has a company-currency field (e.g. amount_total_signed, price_subtotal on reports).
-State the filters and period you used when presenting numbers. If a result says truncated, tell the user.`
+Always state the report or model, filters and period you used. If a result says truncated, tell the user.
+If Odoo reports an access error, explain that the connected user lacks that privilege; don't try to work around it.`
 
 type Options struct {
 	Policy       *policy.Policy
+	Catalog      *reports.Catalog
 	DefaultLimit int
 	MaxLimit     int
 	// Now is overridable for tests.
@@ -49,6 +57,10 @@ type handlers struct {
 
 	mu          sync.Mutex
 	fieldsCache map[string]map[string]policy.FieldMeta
+	accessCache map[string]cached[bool]
+	reportCache map[string]string
+	userCache   *cached[*userInfo]
+	menuCache   *cached[[]menuEntry]
 }
 
 // NewServer builds the MCP server with all tools registered.
@@ -56,7 +68,16 @@ func NewServer(exec odoo.Executor, opts Options, version string) *mcp.Server {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	h := &handlers{odoo: exec, opts: opts, fieldsCache: map[string]map[string]policy.FieldMeta{}}
+	if opts.Catalog == nil {
+		opts.Catalog = &reports.Catalog{}
+	}
+	h := &handlers{
+		odoo:        exec,
+		opts:        opts,
+		fieldsCache: map[string]map[string]policy.FieldMeta{},
+		accessCache: map[string]cached[bool]{},
+		reportCache: map[string]string{},
+	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "odoo", Title: "Odoo", Version: version}, &mcp.ServerOptions{
 		Instructions: Instructions,
 	})
@@ -68,15 +89,35 @@ func NewServer(exec odoo.Executor, opts Options, version string) *mcp.Server {
 	}
 
 	mcp.AddTool(s, tool("odoo_context", "Odoo context",
-		"Who the connector is logged in as, which companies and currencies it sees, and today's date. "+
+		"Who the connector is logged in as, their privileges (Odoo groups), companies, currencies and today's date. "+
 			"Call once at the start of a conversation so relative periods (\"this month\") and currencies are right."),
-		h.odooContext)
-	mcp.AddTool(s, tool("list_models", "List Odoo models",
-		"Find Odoo models (tables) by keyword. Returns technical name, label and the modules that define it."),
+		h.odooContextTool)
+
+	// Catalogs
+	mcp.AddTool(s, tool("list_reports", "Report catalog",
+		"All reports available to the connected user: company_reports (official definitions, run with run_report), "+
+			"odoo_analysis_menus (Odoo's own Reporting views: model, domain, context), and printable_documents (PDFs per model). "+
+			"Start here when the user asks for a report or a business metric without naming a model."),
+		h.listReports)
+	mcp.AddTool(s, tool("run_report", "Run company report",
+		"Run a company report from list_reports for a period, grouped by its dimensions, with optional extra filters."),
+		h.runReport)
+	mcp.AddTool(s, tool("list_modules", "App catalog",
+		"Installed Odoo apps the connected user can open (as on their Odoo home screen), with module name and summary."),
+		h.listModules)
+	mcp.AddTool(s, tool("list_menus", "Menu catalog",
+		"Odoo menus the connected user can see, with the model, domain and context each one opens. "+
+			"Filter by app, keyword, or reporting_only to find analysis views."),
+		h.listMenus)
+	mcp.AddTool(s, tool("list_models", "Model catalog",
+		"Find Odoo models (tables) the connected user can read, by keyword. Returns technical name, label and defining modules."),
 		h.listModels)
+
+	// Ad-hoc queries
 	mcp.AddTool(s, tool("describe_model", "Describe Odoo model",
 		"List a model's fields: label, type, related model, selection values, and whether it is stored. "+
-			"Only stored fields can be used in aggregate_records groupby/aggregates and are reliable in domains."),
+			"Only stored fields can be used in aggregate_records groupby/aggregates and are reliable in domains. "+
+			"Fields restricted to groups the user lacks are omitted by Odoo."),
 		h.describeModel)
 	mcp.AddTool(s, tool("search_records", "Search Odoo records",
 		"Fetch individual records matching a domain. For totals or breakdowns use aggregate_records instead."),
@@ -85,7 +126,7 @@ func NewServer(exec odoo.Executor, opts Options, version string) *mcp.Server {
 		h.countRecords)
 	mcp.AddTool(s, tool("aggregate_records", "Aggregate Odoo records",
 		"Grouped totals (Odoo read_group): sums, averages and counts per period, salesperson, product, customer, etc. "+
-			"Each group includes '__count' (number of records in it)."),
+			"Each group includes '__count' (number of records in it). Date groupings follow the user's timezone."),
 		h.aggregateRecords)
 	return s
 }
@@ -152,6 +193,7 @@ type contextOut struct {
 	DefaultCompany string    `json:"default_company"`
 	Companies      []company `json:"companies"`
 	Today          string    `json:"today"`
+	Privileges     []string  `json:"privileges,omitempty"`
 }
 
 // many2one decodes Odoo's [id, "name"], or false when empty.
@@ -174,26 +216,11 @@ func (m many2one) name() string {
 	return ""
 }
 
-func (h *handlers) odooContext(ctx context.Context, _ *mcp.CallToolRequest, _ contextIn) (*mcp.CallToolResult, contextOut, error) {
-	uid, err := h.odoo.UID(ctx)
+func (h *handlers) odooContextTool(ctx context.Context, _ *mcp.CallToolRequest, _ contextIn) (*mcp.CallToolResult, contextOut, error) {
+	u, err := h.user(ctx)
 	if err != nil {
 		return nil, contextOut{}, userError(err)
 	}
-	var users []struct {
-		Name       string   `json:"name"`
-		TZ         any      `json:"tz"`
-		Lang       any      `json:"lang"`
-		CompanyID  many2one `json:"company_id"`
-		CompanyIDs []int    `json:"company_ids"`
-	}
-	if err := h.odoo.Execute(ctx, "res.users", "read", []any{[]int{uid}},
-		map[string]any{"fields": []string{"name", "tz", "lang", "company_id", "company_ids"}}, &users); err != nil {
-		return nil, contextOut{}, userError(err)
-	}
-	if len(users) == 0 {
-		return nil, contextOut{}, fmt.Errorf("connector user %d not found", uid)
-	}
-	u := users[0]
 	var companies []struct {
 		ID         int      `json:"id"`
 		Name       string   `json:"name"`
@@ -207,22 +234,16 @@ func (h *handlers) odooContext(ctx context.Context, _ *mcp.CallToolRequest, _ co
 	if err != nil {
 		return nil, contextOut{}, userError(err)
 	}
-
+	// Privileges are informational; don't fail the whole call if res.groups isn't readable.
+	privileges, _ := h.privileges(ctx, u)
 	out := contextOut{
 		OdooVersion:    version,
 		User:           u.Name,
-		Timezone:       "UTC",
-		DefaultCompany: u.CompanyID.name(),
-		Today:          h.opts.Now().Format(time.DateOnly),
-	}
-	if tz, ok := u.TZ.(string); ok && tz != "" {
-		out.Timezone = tz
-		if loc, err := time.LoadLocation(tz); err == nil {
-			out.Today = h.opts.Now().In(loc).Format(time.DateOnly)
-		}
-	}
-	if lang, ok := u.Lang.(string); ok {
-		out.Language = lang
+		Timezone:       u.TZ,
+		Language:       u.Lang,
+		DefaultCompany: u.Company,
+		Today:          h.opts.Now().In(u.loc).Format(time.DateOnly),
+		Privileges:     privileges,
 	}
 	for _, c := range companies {
 		out.Companies = append(out.Companies, company{ID: c.ID, Name: c.Name, Currency: c.CurrencyID.name()})
@@ -261,10 +282,18 @@ func (h *handlers) listModels(ctx context.Context, _ *mcp.CallToolRequest, in li
 		map[string]any{"fields": []string{"model", "name", "modules"}, "order": "model"}, &rows); err != nil {
 		return nil, listModelsOut{}, userError(err)
 	}
+	var candidates []string
+	for _, r := range rows {
+		if h.opts.Policy.ModelAllowed(r.Model) {
+			candidates = append(candidates, r.Model)
+		}
+	}
+	readable := h.readable(ctx, candidates)
+
 	const maxModels = 200
 	out := listModelsOut{Models: []modelInfo{}}
 	for _, r := range rows {
-		if !h.opts.Policy.ModelAllowed(r.Model) {
+		if !readable[r.Model] {
 			continue
 		}
 		if len(out.Models) == maxModels {
@@ -476,7 +505,7 @@ func (h *handlers) aggregateRecords(ctx context.Context, _ *mcp.CallToolRequest,
 		}
 	}
 	limit := h.clampLimit(in.Limit)
-	kwargs := map[string]any{"limit": limit, "lazy": false}
+	kwargs := map[string]any{"limit": limit, "lazy": false, "context": h.rpcContext(ctx)}
 	if in.Orderby != "" {
 		kwargs["orderby"] = in.Orderby
 	}
