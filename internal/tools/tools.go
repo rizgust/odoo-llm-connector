@@ -47,6 +47,9 @@ type Options struct {
 	Catalog      *reports.Catalog
 	DefaultLimit int
 	MaxLimit     int
+	// KeepWarm refreshes the menu, access and printable-report caches in the background so the
+	// first catalog call after startup (or after cacheTTL) isn't slow.
+	KeepWarm bool
 	// Now is overridable for tests.
 	Now func() time.Time
 }
@@ -61,6 +64,8 @@ type handlers struct {
 	reportCache map[string]string
 	userCache   *cached[*userInfo]
 	menuCache   *cached[[]menuEntry]
+
+	printableCache *cached[[]printableReport]
 }
 
 // NewServer builds the MCP server with all tools registered.
@@ -77,6 +82,9 @@ func NewServer(exec odoo.Executor, opts Options, version string) *mcp.Server {
 		fieldsCache: map[string]map[string]policy.FieldMeta{},
 		accessCache: map[string]cached[bool]{},
 		reportCache: map[string]string{},
+	}
+	if opts.KeepWarm {
+		go h.keepWarm()
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "odoo", Title: "Odoo", Version: version}, &mcp.ServerOptions{
 		Instructions: Instructions,

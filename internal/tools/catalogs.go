@@ -15,8 +15,10 @@ type menuEntry struct {
 	ActionType string `json:"action_type"`
 	Model      string `json:"model,omitempty"`
 	ViewModes  string `json:"view_modes,omitempty"`
-	Domain     string `json:"domain,omitempty"`
-	Context    string `json:"context,omitempty"`
+	// Wizard marks actions that open a pop-up form (target "new") rather than a data view.
+	Wizard  bool   `json:"wizard,omitempty"`
+	Domain  string `json:"domain,omitempty"`
+	Context string `json:"context,omitempty"`
 	// Queryable means the connector may query Model for this user.
 	Queryable bool `json:"queryable"`
 }
@@ -77,13 +79,14 @@ func (h *handlers) menus(ctx context.Context) ([]menuEntry, error) {
 		ID       int    `json:"id"`
 		ResModel string `json:"res_model"`
 		ViewMode string `json:"view_mode"`
+		Target   any    `json:"target"`
 		Domain   any    `json:"domain"`
 		Context  any    `json:"context"`
 	}
 	var windows []window
 	if len(windowIDs) > 0 {
 		if err := h.odoo.Execute(ctx, "ir.actions.act_window", "read", []any{windowIDs},
-			map[string]any{"fields": []string{"res_model", "view_mode", "domain", "context"}}, &windows); err != nil {
+			map[string]any{"fields": []string{"res_model", "view_mode", "target", "domain", "context"}}, &windows); err != nil {
 			return nil, err
 		}
 	}
@@ -103,6 +106,7 @@ func (h *handlers) menus(ctx context.Context) ([]menuEntry, error) {
 		if w, ok := byID[r.id]; ok {
 			e.Model = w.ResModel
 			e.ViewModes = w.ViewMode
+			e.Wizard = w.Target == "new"
 			e.Domain, _ = w.Domain.(string)
 			e.Context, _ = w.Context.(string)
 			if e.Context == "{}" {

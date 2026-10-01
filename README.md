@@ -62,7 +62,8 @@ filters, measures, dimensions, notes. The built-in set covers Odoo 16 Community 
 **These are starting definitions. Have finance and sales confirm the filters** (which states count, taxed or untaxed,
 which journals), because ChatGPT treats them as the company's official numbers.
 
-To customise, copy the file, edit it and set `REPORTS_FILE` (see the compose example). Each report is checked against
+[config/reports.yaml](config/reports.yaml) is the catalog tailored to the `woodenfish` database (built with
+`go run ./cmd/odoo-map`, see below); docker-compose mounts it. To customise, edit it and restart. Each report is checked against
 the live database at startup; a report whose module isn't installed or whose field names don't match is skipped and
 logged, e.g.
 
@@ -163,6 +164,17 @@ Then ask, for example:
   Rotate it by changing `MCP_ACCESS_TOKEN` and updating the connector.
 - Per-user access (each ChatGPT user mapped to their own Odoo user and rights) would need OAuth between ChatGPT and
   this server. It is not implemented yet.
+
+## Mapping a database
+
+```sh
+go run ./cmd/odoo-map -env .env -out mapping
+```
+
+Read-only inventory of what the connected user can see: apps, custom modules and models, every menu and Reporting
+view, report-model fields and status values in use, documents per company, and which catalog reports work. It reads
+metadata and counts only, no business records. Output goes to `mapping/` (git-ignored). Use it to adapt
+`config/reports.yaml` after Odoo upgrades or new modules.
 
 ## Development
 

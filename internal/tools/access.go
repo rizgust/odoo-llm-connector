@@ -165,3 +165,24 @@ func (h *handlers) privileges(ctx context.Context, u *userInfo) ([]string, error
 	slices.Sort(out)
 	return out, nil
 }
+
+// keepWarm rebuilds the expensive caches shortly before they expire, for the life of the process.
+func (h *handlers) keepWarm() {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		h.mu.Lock()
+		h.userCache, h.menuCache, h.printableCache, h.accessCache = nil, nil, nil, map[string]cached[bool]{}
+		h.mu.Unlock()
+		var models []string
+		for i := range h.opts.Catalog.Reports {
+			r := &h.opts.Catalog.Reports[i]
+			models = append(models, r.Model)
+			h.reportProblem(ctx, r)
+		}
+		h.readable(ctx, models)
+		h.menus(ctx)
+		h.printable(ctx)
+		cancel()
+		time.Sleep(cacheTTL - time.Minute)
+	}
+}

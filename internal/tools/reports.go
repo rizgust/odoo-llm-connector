@@ -147,7 +147,7 @@ func (h *handlers) listReports(ctx context.Context, _ *mcp.CallToolRequest, in l
 	// 2. Odoo's own analysis views (each app's Reporting menu) the user can open.
 	if menus, err := h.menus(ctx); err == nil {
 		for _, m := range menus {
-			if m.isReporting() && m.Model != "" && m.Queryable && matches(m.Path, m.Model) {
+			if m.isReporting() && m.Model != "" && m.Queryable && !m.Wizard && matches(m.Path, m.Model) {
 				out.OdooAnalysis = append(out.OdooAnalysis, m)
 			}
 		}
@@ -169,6 +169,12 @@ func (h *handlers) listReports(ctx context.Context, _ *mcp.CallToolRequest, in l
 }
 
 func (h *handlers) printable(ctx context.Context) ([]printableReport, error) {
+	h.mu.Lock()
+	c := h.printableCache
+	h.mu.Unlock()
+	if c != nil && h.opts.Now().Sub(c.at) < cacheTTL {
+		return c.val, nil
+	}
 	u, err := h.user(ctx)
 	if err != nil {
 		return nil, err
@@ -205,6 +211,9 @@ func (h *handlers) printable(ctx context.Context) ([]printableReport, error) {
 			out = append(out, printableReport{Model: r.Model, Names: []string{r.Name}})
 		}
 	}
+	h.mu.Lock()
+	h.printableCache = &cached[[]printableReport]{out, h.opts.Now()}
+	h.mu.Unlock()
 	return out, nil
 }
 

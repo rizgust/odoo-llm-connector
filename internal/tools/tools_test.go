@@ -150,12 +150,14 @@ func (f *fakeOdoo) Execute(_ context.Context, model, method string, args []any, 
 		         {"complete_name": "Sales/Reporting/Sales", "action": "ir.actions.act_window,11"},
 		         {"complete_name": "Invoicing/Reporting/Invoice Analysis", "action": "ir.actions.act_window,12"},
 		         {"complete_name": "Settings/Technical/System Parameters", "action": "ir.actions.act_window,13"},
+		         {"complete_name": "Point of Sale/Reporting/Sales Details", "action": "ir.actions.act_window,14"},
 		         {"complete_name": "Discuss", "action": "ir.actions.client,5"}]`
 	case model == "ir.actions.act_window":
 		resp = `[{"id": 10, "res_model": "sale.order", "view_mode": "tree,form", "domain": false, "context": "{}"},
 		         {"id": 11, "res_model": "sale.report", "view_mode": "graph,pivot", "domain": "[]", "context": "{'group_by': ['date:month']}"},
 		         {"id": 12, "res_model": "account.invoice.report", "view_mode": "graph,pivot", "domain": "[('move_type', 'in', ('out_invoice', 'out_refund'))]", "context": "{}"},
-		         {"id": 13, "res_model": "ir.config_parameter", "view_mode": "tree,form", "domain": false, "context": "{}"}]`
+		         {"id": 13, "res_model": "ir.config_parameter", "view_mode": "tree,form", "domain": false, "context": "{}"},
+		         {"id": 14, "res_model": "sale.order", "view_mode": "form", "target": "new", "domain": false, "context": "{}"}]`
 	case model == "ir.model.data":
 		resp = `[{"module": "sale", "res_id": 1}]`
 	case model == "ir.module.module":
@@ -339,7 +341,7 @@ func TestListMenus(t *testing.T) {
 	menus := list(out["menus"])
 	if got := pluck(menus, "path"); !slices.Equal(got, []string{
 		"Sales/Orders/Orders", "Sales/Reporting/Sales", "Invoicing/Reporting/Invoice Analysis",
-		"Settings/Technical/System Parameters", "Discuss",
+		"Settings/Technical/System Parameters", "Point of Sale/Reporting/Sales Details", "Discuss",
 	}) {
 		t.Fatalf("paths = %v (folder menus without action should be skipped)", got)
 	}
@@ -355,6 +357,9 @@ func TestListMenus(t *testing.T) {
 	}
 	if m := byPath["Sales/Orders/Orders"]; m["domain"] != nil || m["context"] != nil {
 		t.Errorf("empty domain/context should be omitted: %v", m)
+	}
+	if m := byPath["Point of Sale/Reporting/Sales Details"]; m["wizard"] != true {
+		t.Errorf("pop-up action should be marked wizard: %v", m)
 	}
 	if m := byPath["Discuss"]; m["action_type"] != "client" || m["model"] != nil {
 		t.Errorf("client action = %v", m)

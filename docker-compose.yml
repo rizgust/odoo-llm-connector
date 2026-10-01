@@ -2,10 +2,10 @@ services:
   odoo-gpt-mcp:
     build: .
     env_file: .env
+    environment:
+      REPORTS_FILE: /config/reports.yaml
+    volumes:
+      - ./config/reports.yaml:/config/reports.yaml:ro  # edit and restart to change report definitions
     ports:
       - "127.0.0.1:8000:8000"  # put an HTTPS reverse proxy or tunnel in front; don't expose plain HTTP
-    # To use your own report definitions: copy internal/reports/default.yaml to ./reports.yaml,
-    # uncomment below, and set REPORTS_FILE=/config/reports.yaml in .env
-    # volumes:
-    #   - ./reports.yaml:/config/reports.yaml:ro
     restart: unless-stopped
