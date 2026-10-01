@@ -1,0 +1,294 @@
+# Company report catalog: the official definitions ChatGPT uses for business metrics.
+#
+# Edit a copy and point REPORTS_FILE at it to change definitions without rebuilding.
+# On startup every report is checked against the live Odoo database; a report whose model
+# isn't installed or whose fields don't exist is skipped and logged. At query time a report
+# is only offered if the connected Odoo user can read its model.
+#
+# kind:             aggregate (grouped totals, default) | list (individual records)
+# date_field:       field filtered by run_report's date_from / date_to (inclusive)
+# domain:           Odoo domain always applied; "{today}" = today in the Odoo user's timezone
+# measures:         name + field + agg (sum | avg | min | max | count | count_distinct)
+# dimensions:       name + field; date/datetime dimensions are grouped by day|week|month|quarter|year
+#                   (default month), e.g. group_by ["date:quarter", "customer"]
+# default_group_by: dimensions used when the caller doesn't choose
+# default_sort:     "<measure|dimension|count> [asc|desc]"
+
+reports:
+  # ---------------------------------------------------------------- Sales
+  - name: sales
+    title: Sales (confirmed orders)
+    description: Confirmed sales order lines by order date. Quotations and cancelled orders are excluded.
+    notes: Amounts are untaxed, converted to company currency. This is ordered, not invoiced, revenue.
+    model: sale.report
+    date_field: date
+    domain: [[state, in, [sale, done]]]
+    measures:
+      - {name: revenue_untaxed, field: price_subtotal, agg: sum}
+      - {name: quantity, field: product_uom_qty, agg: sum}
+      - {name: orders, field: order_id, agg: count_distinct}
+    dimensions:
+      - {name: date, field: date}
+      - {name: customer, field: commercial_partner_id}
+      - {name: salesperson, field: user_id}
+      - {name: sales_team, field: team_id}
+      - {name: product, field: product_id}
+      - {name: product_category, field: categ_id}
+      - {name: country, field: country_id}
+      - {name: company, field: company_id}
+    default_group_by: [date]
+
+  - name: quotations
+    title: Open quotations
+    description: Quotations not yet confirmed (draft or sent), by quotation date.
+    notes: Amounts are untaxed, converted to company currency.
+    model: sale.report
+    date_field: date
+    domain: [[state, in, [draft, sent]]]
+    measures:
+      - {name: amount_untaxed, field: price_subtotal, agg: sum}
+      - {name: quotations, field: order_id, agg: count_distinct}
+    dimensions:
+      - {name: date, field: date}
+      - {name: customer, field: commercial_partner_id}
+      - {name: salesperson, field: user_id}
+      - {name: sales_team, field: team_id}
+    default_group_by: [salesperson]
+    default_sort: amount_untaxed desc
+
+  # ---------------------------------------------------------------- Accounting
+  - name: invoiced_revenue
+    title: Invoiced revenue
+    description: Posted customer invoices minus credit notes, by invoice date. The finance view of revenue.
+    notes: Amounts are untaxed, in company currency. Credit notes are negative, so totals are net.
+    model: account.invoice.report
+    date_field: invoice_date
+    domain: [[move_type, in, [out_invoice, out_refund]], [state, "=", posted]]
+    measures:
+      - {name: revenue_untaxed, field: price_subtotal, agg: sum}
+      - {name: quantity, field: quantity, agg: sum}
+      - {name: invoices, field: move_id, agg: count_distinct}
+    dimensions:
+      - {name: date, field: invoice_date}
+      - {name: customer, field: commercial_partner_id}
+      - {name: salesperson, field: invoice_user_id}
+      - {name: product, field: product_id}
+      - {name: product_category, field: product_categ_id}
+      - {name: country, field: country_id}
+      - {name: journal, field: journal_id}
+      - {name: company, field: company_id}
+    default_group_by: [date]
+
+  - name: vendor_bills
+    title: Vendor bills (spend)
+    description: Posted vendor bills minus refunds, by bill date.
+    notes: >-
+      Amounts are untaxed, in company currency, and NEGATIVE for bills (Odoo's signed convention);
+      present spend as the absolute value.
+    model: account.invoice.report
+    date_field: invoice_date
+    domain: [[move_type, in, [in_invoice, in_refund]], [state, "=", posted]]
+    measures:
+      - {name: spend_untaxed, field: price_subtotal, agg: sum}
+      - {name: bills, field: move_id, agg: count_distinct}
+    dimensions:
+      - {name: date, field: invoice_date}
+      - {name: vendor, field: commercial_partner_id}
+      - {name: product, field: product_id}
+      - {name: product_category, field: product_categ_id}
+      - {name: account, field: account_id}
+      - {name: company, field: company_id}
+    default_group_by: [date]
+
+  - name: receivables
+    title: Open receivables
+    description: Unpaid or partially paid posted customer invoices, with the amount still due. date_from/date_to filter the due date.
+    notes: Amount due is in company currency. Add filter [["invoice_date_due","<","{today}"]] for overdue only.
+    model: account.move
+    date_field: invoice_date_due
+    domain: [[move_type, in, [out_invoice, out_refund]], [state, "=", posted], [payment_state, in, [not_paid, partial]]]
+    measures:
+      - {name: amount_due, field: amount_residual_signed, agg: sum}
+    dimensions:
+      - {name: customer, field: commercial_partner_id}
+      - {name: due_date, field: invoice_date_due}
+      - {name: salesperson, field: invoice_user_id}
+      - {name: company, field: company_id}
+    default_group_by: [customer]
+    default_sort: amount_due desc
+
+  - name: overdue_invoices
+    title: Overdue customer invoices
+    description: Individual posted customer invoices past their due date and not fully paid, oldest first.
+    notes: Amounts are in company currency.
+    kind: list
+    model: account.move
+    domain:
+      - [move_type, "=", out_invoice]
+      - [state, "=", posted]
+      - [payment_state, in, [not_paid, partial]]
+      - [invoice_date_due, "<", "{today}"]
+    fields: [name, commercial_partner_id, invoice_date, invoice_date_due, amount_total_signed, amount_residual_signed, invoice_user_id]
+    order: invoice_date_due asc
+
+  - name: payables
+    title: Open payables
+    description: Unpaid or partially paid posted vendor bills, with the amount still owed. date_from/date_to filter the due date.
+    notes: Amounts are in company currency and NEGATIVE for bills; present as absolute values.
+    model: account.move
+    date_field: invoice_date_due
+    domain: [[move_type, in, [in_invoice, in_refund]], [state, "=", posted], [payment_state, in, [not_paid, partial]]]
+    measures:
+      - {name: amount_owed, field: amount_residual_signed, agg: sum}
+    dimensions:
+      - {name: vendor, field: commercial_partner_id}
+      - {name: due_date, field: invoice_date_due}
+      - {name: company, field: company_id}
+    default_group_by: [vendor]
+    default_sort: amount_owed asc
+
+  # ---------------------------------------------------------------- Purchase
+  - name: purchases
+    title: Purchases (confirmed orders)
+    description: Confirmed purchase order lines by order date. RFQs and cancelled orders are excluded.
+    notes: Amounts include tax, converted to company currency.
+    model: purchase.report
+    date_field: date_order
+    domain: [[state, in, [purchase, done]]]
+    measures:
+      - {name: total, field: price_total, agg: sum}
+      - {name: quantity, field: qty_ordered, agg: sum}
+      - {name: orders, field: order_id, agg: count_distinct}
+    dimensions:
+      - {name: date, field: date_order}
+      - {name: vendor, field: partner_id}
+      - {name: purchaser, field: user_id}
+      - {name: product, field: product_id}
+      - {name: product_category, field: category_id}
+      - {name: company, field: company_id}
+    default_group_by: [date]
+
+  # ---------------------------------------------------------------- Inventory
+  - name: stock_on_hand
+    title: Stock on hand
+    description: Current quantities in internal (warehouse) locations.
+    notes: Quantities are in each product's unit of measure; don't add up different products.
+    model: stock.quant
+    domain: [[location_id.usage, "=", internal]]
+    measures:
+      - {name: quantity, field: quantity, agg: sum}
+      - {name: reserved, field: reserved_quantity, agg: sum}
+    dimensions:
+      - {name: product, field: product_id}
+      - {name: location, field: location_id}
+      - {name: company, field: company_id}
+    default_group_by: [product]
+    default_sort: quantity desc
+
+  # ---------------------------------------------------------------- CRM
+  - name: pipeline
+    title: Sales pipeline (opportunities)
+    description: Active opportunities by creation date.
+    notes: Lost opportunities are archived in Odoo and therefore excluded. Expected revenue is in company currency.
+    model: crm.lead
+    date_field: create_date
+    domain: [[type, "=", opportunity]]
+    measures:
+      - {name: expected_revenue, field: expected_revenue, agg: sum}
+      - {name: prorated_revenue, field: prorated_revenue, agg: sum}
+    dimensions:
+      - {name: date, field: create_date}
+      - {name: stage, field: stage_id}
+      - {name: salesperson, field: user_id}
+      - {name: sales_team, field: team_id}
+      - {name: source, field: source_id}
+      - {name: customer, field: partner_id}
+    default_group_by: [stage]
+
+  - name: leads
+    title: New leads and opportunities
+    description: Leads and opportunities by creation date, for lead-generation questions.
+    notes: Lost (archived) records are excluded unless you add filter [["active","in",[true,false]]].
+    model: crm.lead
+    date_field: create_date
+    domain: []
+    measures:
+      - {name: expected_revenue, field: expected_revenue, agg: sum}
+    dimensions:
+      - {name: date, field: create_date}
+      - {name: type, field: type}
+      - {name: source, field: source_id}
+      - {name: medium, field: medium_id}
+      - {name: salesperson, field: user_id}
+      - {name: sales_team, field: team_id}
+    default_group_by: [date]
+
+  # ---------------------------------------------------------------- HR
+  - name: expenses
+    title: Employee expenses
+    description: Approved and paid employee expenses by expense date.
+    notes: Amounts are in company currency, including tax.
+    model: hr.expense
+    date_field: date
+    domain: [[state, in, [approved, done]]]
+    measures:
+      - {name: total, field: total_amount_company, agg: sum}
+    dimensions:
+      - {name: date, field: date}
+      - {name: employee, field: employee_id}
+      - {name: category, field: product_id}
+      - {name: company, field: company_id}
+    default_group_by: [date]
+
+  - name: time_off
+    title: Time off taken
+    description: Validated time off by start date.
+    notes: Duration is in days.
+    model: hr.leave
+    date_field: date_from
+    domain: [[state, "=", validate]]
+    measures:
+      - {name: days, field: number_of_days, agg: sum}
+    dimensions:
+      - {name: date, field: date_from}
+      - {name: employee, field: employee_id}
+      - {name: type, field: holiday_status_id}
+      - {name: department, field: department_id}
+    default_group_by: [type]
+
+  # ---------------------------------------------------------------- Point of Sale
+  - name: pos_sales
+    title: Point of Sale sales
+    description: POS order lines by order date (paid, posted and invoiced orders).
+    notes: Amounts are untaxed, in company currency.
+    model: report.pos.order
+    date_field: date
+    domain: [[state, in, [paid, done, invoiced]]]
+    measures:
+      - {name: revenue_untaxed, field: price_sub_total, agg: sum}
+      - {name: quantity, field: product_qty, agg: sum}
+      - {name: orders, field: order_id, agg: count_distinct}
+    dimensions:
+      - {name: date, field: date}
+      - {name: point_of_sale, field: config_id}
+      - {name: cashier, field: user_id}
+      - {name: product, field: product_id}
+      - {name: product_category, field: product_categ_id}
+    default_group_by: [date]
+
+  # ---------------------------------------------------------------- Project
+  - name: timesheets
+    title: Timesheet hours
+    description: Hours logged on timesheets by date.
+    model: account.analytic.line
+    date_field: date
+    domain: [[project_id, "!=", false]]
+    measures:
+      - {name: hours, field: unit_amount, agg: sum}
+    dimensions:
+      - {name: date, field: date}
+      - {name: employee, field: employee_id}
+      - {name: project, field: project_id}
+      - {name: task, field: task_id}
+    default_group_by: [project]
+    default_sort: hours desc
