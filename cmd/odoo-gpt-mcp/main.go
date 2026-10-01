@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // users' Odoo timezones resolve even in minimal containers
@@ -18,6 +19,7 @@ import (
 	"github.com/rizgust/odoo-gpt-mcp/internal/config"
 	"github.com/rizgust/odoo-gpt-mcp/internal/odoo"
 	"github.com/rizgust/odoo-gpt-mcp/internal/policy"
+	"github.com/rizgust/odoo-gpt-mcp/internal/reports"
 	"github.com/rizgust/odoo-gpt-mcp/internal/tools"
 )
 
@@ -47,8 +49,16 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("connected to Odoo", "url", cfg.OdooURL, "db", cfg.OdooDB, "uid", uid)
 
+	catalog, err := reports.Load(cfg.ReportsFile)
+	if err != nil {
+		return err
+	}
+	pol := &policy.Policy{Allowed: cfg.AllowedModels, Blocked: cfg.BlockedModels, MaxTextLength: cfg.MaxTextLength}
+	checkReports(log, client, pol, catalog, cfg.OdooTimeout)
+
 	server := tools.NewServer(client, tools.Options{
-		Policy:       &policy.Policy{Allowed: cfg.AllowedModels, Blocked: cfg.BlockedModels, MaxTextLength: cfg.MaxTextLength},
+		Policy:       pol,
+		Catalog:      catalog,
 		DefaultLimit: cfg.DefaultLimit,
 		MaxLimit:     cfg.MaxLimit,
 	}, version)
@@ -73,6 +83,23 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	return nil
+}
+
+// checkReports logs which catalog reports work against this database, so a wrong field
+// name or a missing module shows up at startup instead of in a ChatGPT conversation.
+func checkReports(log *slog.Logger, exec odoo.Executor, pol *policy.Policy, catalog *reports.Catalog, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var ok []string
+	for i := range catalog.Reports {
+		r := &catalog.Reports[i]
+		if reason := tools.CheckReport(ctx, exec, pol, r); reason != "" {
+			log.Warn("report unavailable", "report", r.Name, "reason", reason)
+			continue
+		}
+		ok = append(ok, r.Name)
+	}
+	log.Info("report catalog loaded", "available", strings.Join(ok, ","), "total", len(catalog.Reports))
 }
 
 // newHandler routes /healthz and the token-guarded MCP endpoint.
