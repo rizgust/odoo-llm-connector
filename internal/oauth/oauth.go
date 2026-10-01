@@ -37,8 +37,9 @@ const (
 	RefreshTTL = 90 * 24 * time.Hour // sliding: every refresh issues a new 90-day token
 )
 
-// Redirect hosts accepted for clients that didn't register dynamically.
-var knownRedirectHosts = []string{"chatgpt.com", "chat.openai.com"}
+// Redirect hosts accepted for clients that didn't register dynamically: ChatGPT with a manually
+// entered client ID, and Claude's published identity (a client ID metadata document URL).
+var knownRedirectHosts = []string{"chatgpt.com", "chat.openai.com", "claude.ai", "claude.com"}
 
 // Identity is the Odoo account a token acts as.
 type Identity struct {
@@ -207,7 +208,10 @@ func (s *Server) metadata(w http.ResponseWriter, _ *http.Request) {
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
-		"scopes_supported":                      []string{"odoo"},
+		"scopes_supported":                      []string{"odoo", "offline_access"},
+		// Client IDs that are URLs (Claude's published identity) are accepted for the known
+		// redirect hosts above, without fetching the document.
+		"client_id_metadata_document_supported": true,
 	})
 }
 
@@ -440,7 +444,7 @@ func (s *Server) issueTokens(w http.ResponseWriter, id Identity) {
 		"token_type":    "Bearer",
 		"expires_in":    int(AccessTTL.Seconds()),
 		"refresh_token": refresh,
-		"scope":         "odoo",
+		"scope":         "odoo offline_access",
 	})
 }
 

@@ -251,6 +251,11 @@ func TestRedirectValidation(t *testing.T) {
 	if rec := e.do("GET", "/authorize?"+authForm("manual-client", "https://evil.example/cb").Encode(), nil, ""); rec.Code != 400 {
 		t.Errorf("manual client to evil = %d", rec.Code)
 	}
+	// Claude's published identity: the client ID is a metadata document URL.
+	claude := authForm("https://claude.ai/oauth/claude-code-client-metadata", "https://claude.ai/api/mcp/auth_callback")
+	if rec := e.do("GET", "/authorize?"+claude.Encode(), nil, ""); rec.Code != 200 {
+		t.Errorf("Claude published identity = %d", rec.Code)
+	}
 
 	// PKCE is mandatory.
 	noPKCE := authForm(clientID, redirectURI)
