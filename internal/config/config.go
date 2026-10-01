@@ -60,6 +60,8 @@ type Config struct {
 
 	// ReportsFile is a YAML report catalog; empty = built-in default.
 	ReportsFile string
+	// PluginZip is the ChatGPT plugin package offered at /nuanu-odoo-plugin.zip; empty = not served.
+	PluginZip string
 }
 
 func FromEnv() (*Config, error) {
@@ -106,6 +108,7 @@ func FromEnv() (*Config, error) {
 
 	cfg.ListenAddr = envOr("MCP_LISTEN_ADDR", ":8000")
 	cfg.ReportsFile = os.Getenv("REPORTS_FILE")
+	cfg.PluginZip = os.Getenv("PLUGIN_ZIP")
 	cfg.AllowedModels = csv(os.Getenv("ODOO_ALLOWED_MODELS"))
 	cfg.BlockedModels = DefaultBlockedModels
 	if v, ok := os.LookupEnv("ODOO_BLOCKED_MODELS"); ok {

@@ -14,9 +14,12 @@ cd "$(dirname "$0")/.."
 VERSION="$(git describe --always --dirty 2>/dev/null || echo dev)"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o deploy/odoo-gpt-mcp ./cmd/odoo-gpt-mcp
 
+PLUGIN_ZIP="$(bash deploy/build-plugin.sh | tail -1)"
+
 ssh "$HOST" "mkdir -p $DIR"
 scp -q deploy/odoo-gpt-mcp deploy/Dockerfile.prebuilt "$HOST:$DIR/"
 scp -q config/reports.yaml "$HOST:$DIR/reports.yaml"
+scp -q "$PLUGIN_ZIP" "$HOST:$DIR/nuanu-odoo-plugin.zip"
 rm -f deploy/odoo-gpt-mcp
 
 ssh "$HOST" bash -s -- "$DIR" <<'REMOTE'
@@ -42,6 +45,8 @@ docker run -d --name odoo-gpt-mcp \
 	--restart unless-stopped \
 	--env-file .env \
 	-v "$DIR/reports.yaml:/config/reports.yaml:ro" \
+	-v "$DIR/nuanu-odoo-plugin.zip:/plugin/nuanu-odoo-plugin.zip:ro" \
+	-e PLUGIN_ZIP=/plugin/nuanu-odoo-plugin.zip \
 	--memory 256m \
 	odoo-gpt-mcp:latest >/dev/null
 sleep 3

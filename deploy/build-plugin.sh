@@ -15,5 +15,5 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for f in sorted(root.rglob("*")):
         if f.is_file():
             z.write(f, f.relative_to(root).as_posix())  # plugin.json at the ZIP root
-print(out)
+print(out.as_posix())
 PY

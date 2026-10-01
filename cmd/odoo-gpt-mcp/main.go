@@ -151,6 +151,7 @@ func newOAuthHandler(cfg *config.Config, as *oauth.Server, serverFor func(oauth.
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
 	})
+	addPluginDownload(mux, cfg.PluginZip)
 	as.Register(mux, "/mcp")
 	mux.Handle("/mcp", checkHost(cfg.PublicHost, protected))
 	return mux
@@ -189,10 +190,25 @@ func newHandler(cfg *config.Config, server *mcp.Server, log *slog.Logger) http.H
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok"}`))
 	})
+	addPluginDownload(mux, cfg.PluginZip)
 	// ChatGPT connectors can't send a static header, so the secret lives in the URL path.
 	// Wrong paths fall through to the mux's 404.
 	mux.Handle("/mcp/"+cfg.AccessToken, checkHost(cfg.PublicHost, mcpHandler))
 	return mux
+}
+
+// addPluginDownload serves the ChatGPT plugin package that users upload in ChatGPT
+// (Plugins → + → Upload plugin). It holds no secrets: only the server URL, skill and icon.
+func addPluginDownload(mux *http.ServeMux, path string) {
+	if path == "" {
+		return
+	}
+	mux.HandleFunc("GET /nuanu-odoo-plugin.zip", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="nuanu-odoo-plugin.zip"`)
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, path)
+	})
 }
 
 // checkHost rejects requests whose Host header isn't the configured public hostname

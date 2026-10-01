@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -164,5 +165,28 @@ func TestOAuthMode(t *testing.T) {
 	h.ServeHTTP(rec, call)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("foreign host = %d", rec.Code)
+	}
+}
+
+func TestPluginDownload(t *testing.T) {
+	zip := t.TempDir() + "/plugin.zip"
+	if err := os.WriteFile(zip, []byte("PK-fake-zip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{PublicURL: "https://odoo.mcp.example.com", PublicHost: "odoo.mcp.example.com", PluginZip: zip}
+	as, _ := oauth.New(cfg.PublicURL, strings.Repeat("s", 32), nil)
+	h := newOAuthHandler(cfg, as, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/nuanu-odoo-plugin.zip", nil))
+	if rec.Code != 200 || rec.Body.String() != "PK-fake-zip" || !strings.Contains(rec.Header().Get("Content-Disposition"), "nuanu-odoo-plugin.zip") {
+		t.Errorf("download = %d %q %q", rec.Code, rec.Body, rec.Header().Get("Content-Disposition"))
+	}
+
+	cfg.PluginZip = ""
+	h = newOAuthHandler(cfg, as, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/nuanu-odoo-plugin.zip", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("download without PLUGIN_ZIP = %d", rec.Code)
 	}
 }
