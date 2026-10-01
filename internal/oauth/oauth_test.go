@@ -251,11 +251,6 @@ func TestRedirectValidation(t *testing.T) {
 	if rec := e.do("GET", "/authorize?"+authForm("manual-client", "https://evil.example/cb").Encode(), nil, ""); rec.Code != 400 {
 		t.Errorf("manual client to evil = %d", rec.Code)
 	}
-	// Claude's published identity: the client ID is a metadata document URL.
-	claude := authForm("https://claude.ai/oauth/claude-code-client-metadata", "https://claude.ai/api/mcp/auth_callback")
-	if rec := e.do("GET", "/authorize?"+claude.Encode(), nil, ""); rec.Code != 200 {
-		t.Errorf("Claude published identity = %d", rec.Code)
-	}
 
 	// PKCE is mandatory.
 	noPKCE := authForm(clientID, redirectURI)
@@ -281,5 +276,77 @@ func TestTokensFromAnotherSecretRejected(t *testing.T) {
 	other, _ := New(publicURL, strings.Repeat("x", 32), nil)
 	if _, err := other.Verifier()(context.Background(), tok["access_token"].(string), nil); err == nil {
 		t.Error("token sealed with another secret was accepted")
+	}
+}
+
+func TestClientMetadataDocument(t *testing.T) {
+	e := newEnv(t)
+	const docURL = "https://claude.ai/oauth/claude-code-client-metadata"
+	fetches := 0
+	e.srv.fetchDoc = func(_ context.Context, u string) ([]byte, error) {
+		fetches++
+		if u != docURL {
+			return nil, errors.New("not found")
+		}
+		return []byte(`{"client_id":"` + docURL + `","redirect_uris":["http://localhost/callback","http://127.0.0.1/callback"]}`), nil
+	}
+	allowed := func(clientID, redirect string) bool {
+		return e.do("GET", "/authorize?"+authForm(clientID, redirect).Encode(), nil, "").Code == 200
+	}
+
+	// Claude Code signs in through a random loopback port.
+	if !allowed(docURL, "http://localhost:53682/callback") || !allowed(docURL, "http://127.0.0.1:9000/callback") {
+		t.Error("loopback redirect on any port should be accepted for the document's redirect_uris")
+	}
+	if fetches != 1 {
+		t.Errorf("document fetched %d times, want 1 (cached)", fetches)
+	}
+	for _, bad := range []string{"http://localhost:53682/other", "https://evil.example/callback", "http://evil.example/callback"} {
+		if allowed(docURL, bad) {
+			t.Errorf("redirect %s should be rejected", bad)
+		}
+	}
+	// Documents are only fetched from known hosts, and must name themselves.
+	if allowed("https://evil.example/client.json", "http://localhost:1/callback") {
+		t.Error("metadata document from unknown host accepted")
+	}
+	if allowed("https://claude.ai/other-client", "http://localhost:1/callback") {
+		t.Error("document that failed to load accepted")
+	}
+	e.srv.fetchDoc = func(context.Context, string) ([]byte, error) {
+		return []byte(`{"client_id":"https://claude.ai/someone-else","redirect_uris":["http://localhost/callback"]}`), nil
+	}
+	if allowed("https://claude.ai/mismatch", "http://localhost:1/callback") {
+		t.Error("document whose client_id doesn't match its URL accepted")
+	}
+
+	// Full flow with the loopback redirect, including the token exchange.
+	e.srv.fetchDoc = func(context.Context, string) ([]byte, error) {
+		return []byte(`{"client_id":"` + docURL + `","redirect_uris":["http://localhost/callback"]}`), nil
+	}
+	form := authForm(docURL, "http://localhost:53682/callback")
+	form.Set("login", "ana@nuanu.com")
+	form.Set("api_key", "good-key")
+	rec := e.do("POST", "/authorize", form, "")
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	if rec.Code != http.StatusFound || loc.Host != "localhost:53682" {
+		t.Fatalf("authorize = %d %s", rec.Code, rec.Header().Get("Location"))
+	}
+	tok := e.do("POST", "/token", url.Values{"grant_type": {"authorization_code"}, "code": {loc.Query().Get("code")},
+		"client_id": {docURL}, "redirect_uri": {"http://localhost:53682/callback"}, "code_verifier": {verifier}}, "")
+	if tok.Code != 200 {
+		t.Errorf("token = %d %s", tok.Code, tok.Body)
+	}
+}
+
+func TestDynamicClientLoopbackAnyPort(t *testing.T) {
+	e := newEnv(t)
+	rec := e.do("POST", "/register", nil, `{"redirect_uris":["http://localhost:3000/callback"]}`)
+	clientID := decode(t, rec)["client_id"].(string)
+	if e.do("GET", "/authorize?"+authForm(clientID, "http://localhost:4111/callback").Encode(), nil, "").Code != 200 {
+		t.Error("registered loopback redirect should match on any port")
+	}
+	if e.do("GET", "/authorize?"+authForm(clientID, "http://localhost:4111/elsewhere").Encode(), nil, "").Code != 400 {
+		t.Error("different loopback path accepted")
 	}
 }

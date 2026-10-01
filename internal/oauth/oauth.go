@@ -37,8 +37,8 @@ const (
 	RefreshTTL = 90 * 24 * time.Hour // sliding: every refresh issues a new 90-day token
 )
 
-// Redirect hosts accepted for clients that didn't register dynamically: ChatGPT with a manually
-// entered client ID, and Claude's published identity (a client ID metadata document URL).
+// Redirect hosts accepted for client IDs that are neither registered nor metadata documents,
+// e.g. ChatGPT configured with a manually entered client ID.
 var knownRedirectHosts = []string{"chatgpt.com", "chat.openai.com", "claude.ai", "claude.com"}
 
 // Identity is the Odoo account a token acts as.
@@ -57,8 +57,12 @@ type Server struct {
 	authenticate Authenticator
 	now          func() time.Time
 
+	// fetchDoc retrieves client ID metadata documents; overridable for tests.
+	fetchDoc func(ctx context.Context, url string) ([]byte, error)
+
 	mu        sync.Mutex
 	usedCodes map[string]time.Time
+	docs      map[string]clientDoc
 }
 
 // New creates the authorization server. secret should be at least 32 random bytes;
@@ -81,7 +85,9 @@ func New(publicURL, secret string, authenticate Authenticator) (*Server, error) 
 		aead:         aead,
 		authenticate: authenticate,
 		now:          time.Now,
+		fetchDoc:     fetchDocument,
 		usedCodes:    map[string]time.Time{},
+		docs:         map[string]clientDoc{},
 	}, nil
 }
 
@@ -209,8 +215,7 @@ func (s *Server) metadata(w http.ResponseWriter, _ *http.Request) {
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported":                      []string{"odoo", "offline_access"},
-		// Client IDs that are URLs (Claude's published identity) are accepted for the known
-		// redirect hosts above, without fetching the document.
+		// Client IDs may be metadata document URLs (Claude's and Claude Code's published identity).
 		"client_id_metadata_document_supported": true,
 	})
 }
@@ -255,12 +260,15 @@ func validRedirect(raw string) bool {
 
 // redirectAllowed checks redirectURI against a registered client, or the known ChatGPT
 // hosts for clients configured manually with an arbitrary client ID.
-func (s *Server) redirectAllowed(clientID, redirectURI string) bool {
+func (s *Server) redirectAllowed(ctx context.Context, clientID, redirectURI string) bool {
 	if !validRedirect(redirectURI) {
 		return false
 	}
 	if p, ok := s.open(clientID, "client"); ok {
-		return slices.Contains(p.Redirects, redirectURI)
+		return redirectMatches(p.Redirects, redirectURI)
+	}
+	if redirects, ok := s.documentRedirects(ctx, clientID); ok {
+		return redirectMatches(redirects, redirectURI)
 	}
 	u, _ := url.Parse(redirectURI)
 	return u.Scheme == "https" && slices.Contains(knownRedirectHosts, u.Hostname())
@@ -290,7 +298,7 @@ func parseAuthRequest(v url.Values) (authRequest, string) {
 
 func (s *Server) authorizePage(w http.ResponseWriter, r *http.Request) {
 	ar, problem := parseAuthRequest(r.URL.Query())
-	if problem == "" && !s.redirectAllowed(ar.ClientID, ar.RedirectURI) {
+	if problem == "" && !s.redirectAllowed(r.Context(), ar.ClientID, ar.RedirectURI) {
 		problem = "redirect_uri is not registered for this client"
 	}
 	if problem != "" {
@@ -307,7 +315,7 @@ func (s *Server) authorizeSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ar, problem := parseAuthRequest(r.PostForm)
-	if problem == "" && !s.redirectAllowed(ar.ClientID, ar.RedirectURI) {
+	if problem == "" && !s.redirectAllowed(r.Context(), ar.ClientID, ar.RedirectURI) {
 		problem = "redirect_uri is not registered for this client"
 	}
 	if problem != "" {
