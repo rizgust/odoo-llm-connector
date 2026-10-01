@@ -2,15 +2,21 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/rizgust/odoo-gpt-mcp/internal/config"
+	"github.com/rizgust/odoo-gpt-mcp/internal/oauth"
 	"github.com/rizgust/odoo-gpt-mcp/internal/policy"
 	"github.com/rizgust/odoo-gpt-mcp/internal/tools"
 )
@@ -83,5 +89,80 @@ func TestPublicHostCheck(t *testing.T) {
 		if rec := post(h, "/mcp/"+token, host, initialize); rec.Code != 200 {
 			t.Errorf("%s: status %d, want 200 (%s)", host, rec.Code, rec.Body)
 		}
+	}
+}
+
+func TestOAuthMode(t *testing.T) {
+	cfg := &config.Config{PublicURL: "https://odoo.mcp.example.com", PublicHost: "odoo.mcp.example.com"}
+	as, err := oauth.New(cfg.PublicURL, strings.Repeat("s", 32), func(context.Context, string, string) (int, error) { return 7, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var served []oauth.Identity
+	server := tools.NewServer(stubOdoo{}, tools.Options{Policy: &policy.Policy{MaxTextLength: 500}, DefaultLimit: 80, MaxLimit: 500}, "test")
+	h := newOAuthHandler(cfg, as, func(id oauth.Identity) *mcp.Server {
+		served = append(served, id)
+		return server
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// No token: 401 pointing at the resource metadata, which is how ChatGPT discovers sign-in.
+	rec := post(h, "/mcp", "odoo.mcp.example.com", initialize)
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Header().Get("WWW-Authenticate"),
+		`resource_metadata="https://odoo.mcp.example.com/.well-known/oauth-protected-resource"`) {
+		t.Fatalf("unauthenticated = %d %q", rec.Code, rec.Header().Get("WWW-Authenticate"))
+	}
+
+	// Get a real token through the flow.
+	reg := httptest.NewRecorder()
+	h.ServeHTTP(reg, httptest.NewRequest("POST", "/register", strings.NewReader(`{"redirect_uris":["https://chatgpt.com/cb"]}`)))
+	var client struct {
+		ClientID string `json:"client_id"`
+	}
+	json.Unmarshal(reg.Body.Bytes(), &client)
+	verifier := strings.Repeat("v", 50)
+	sum := sha256.Sum256([]byte(verifier))
+	form := url.Values{"response_type": {"code"}, "client_id": {client.ClientID}, "redirect_uri": {"https://chatgpt.com/cb"},
+		"code_challenge": {base64.RawURLEncoding.EncodeToString(sum[:])}, "code_challenge_method": {"S256"},
+		"login": {"ana@nuanu.com"}, "api_key": {"k"}}
+	authz := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.ServeHTTP(authz, req)
+	loc, _ := url.Parse(authz.Header().Get("Location"))
+	tokenForm := url.Values{"grant_type": {"authorization_code"}, "code": {loc.Query().Get("code")},
+		"redirect_uri": {"https://chatgpt.com/cb"}, "code_verifier": {verifier}}
+	tokRec := httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/token", strings.NewReader(tokenForm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.ServeHTTP(tokRec, req)
+	var tok struct {
+		AccessToken string `json:"access_token"`
+	}
+	json.Unmarshal(tokRec.Body.Bytes(), &tok)
+	if tok.AccessToken == "" {
+		t.Fatalf("no token: %s", tokRec.Body)
+	}
+
+	call := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(countCall))
+	call.Host = "odoo.mcp.example.com"
+	call.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	call.Header.Set("Content-Type", "application/json")
+	call.Header.Set("Accept", "application/json, text/event-stream")
+	call.Header.Set("MCP-Protocol-Version", "2025-06-18")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, call)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"count":5`) {
+		t.Fatalf("authenticated call = %d %s", rec.Code, rec.Body)
+	}
+	if len(served) == 0 || served[0].Login != "ana@nuanu.com" || served[0].UID != 7 {
+		t.Errorf("request not routed to the signed-in user's server: %+v", served)
+	}
+
+	// Wrong host is still refused even with a valid token.
+	call.Host = "evil.example.net"
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, call)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("foreign host = %d", rec.Code)
 	}
 }

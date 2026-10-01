@@ -1,0 +1,5 @@
+# Image for a binary built by deploy/deploy.sh (no Go toolchain on the server).
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --chmod=0755 odoo-gpt-mcp /odoo-gpt-mcp
+EXPOSE 8000
+ENTRYPOINT ["/odoo-gpt-mcp"]

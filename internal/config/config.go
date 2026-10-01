@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -38,7 +39,13 @@ type Config struct {
 	OdooAPIKey  string
 	OdooTimeout time.Duration
 
-	// AccessToken is the secret path segment of the MCP endpoint: /mcp/<AccessToken>.
+	// OAuthSecret enables per-user sign-in: each ChatGPT user connects with their own Odoo
+	// login and API key. ODOO_USER/ODOO_API_KEY then only serve the startup report check.
+	OAuthSecret string
+	// PublicURL is the external base URL, e.g. https://odoo.mcp.nuanu.com (required with OAuth).
+	PublicURL string
+
+	// AccessToken is the secret path segment of the shared-account endpoint: /mcp/<AccessToken>.
 	AccessToken string
 	ListenAddr  string
 	// PublicHost, when set, is the only Host header accepted on the MCP endpoint.
@@ -67,22 +74,37 @@ func FromEnv() (*Config, error) {
 	cfg := &Config{
 		OdooURL:     strings.TrimRight(need("ODOO_URL"), "/"),
 		OdooDB:      need("ODOO_DB"),
-		OdooUser:    need("ODOO_USER"),
-		OdooAPIKey:  need("ODOO_API_KEY"),
-		AccessToken: need("MCP_ACCESS_TOKEN"),
+		OAuthSecret: os.Getenv("OAUTH_SECRET"),
+	}
+	if cfg.OAuth() {
+		cfg.PublicURL = strings.TrimRight(need("MCP_PUBLIC_URL"), "/")
+		cfg.OdooUser, cfg.OdooAPIKey = os.Getenv("ODOO_USER"), os.Getenv("ODOO_API_KEY")
+	} else {
+		cfg.OdooUser, cfg.OdooAPIKey, cfg.AccessToken = need("ODOO_USER"), need("ODOO_API_KEY"), need("MCP_ACCESS_TOKEN")
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
 	}
-	if len(cfg.AccessToken) < 32 {
-		return nil, fmt.Errorf("MCP_ACCESS_TOKEN must be at least 32 characters (it is the only thing guarding the URL)")
-	}
-	if !tokenChars.MatchString(cfg.AccessToken) {
-		return nil, fmt.Errorf("MCP_ACCESS_TOKEN may only contain letters, digits, '-' and '_' (it is part of the URL path)")
+	if cfg.OAuth() {
+		if len(cfg.OAuthSecret) < 32 {
+			return nil, fmt.Errorf("OAUTH_SECRET must be at least 32 characters")
+		}
+		u, err := url.Parse(cfg.PublicURL)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.Path != "" {
+			return nil, fmt.Errorf("MCP_PUBLIC_URL must be an https origin like https://odoo.mcp.example.com, got %q", cfg.PublicURL)
+		}
+		cfg.PublicHost = u.Hostname()
+	} else {
+		if len(cfg.AccessToken) < 32 {
+			return nil, fmt.Errorf("MCP_ACCESS_TOKEN must be at least 32 characters (it is the only thing guarding the URL)")
+		}
+		if !tokenChars.MatchString(cfg.AccessToken) {
+			return nil, fmt.Errorf("MCP_ACCESS_TOKEN may only contain letters, digits, '-' and '_' (it is part of the URL path)")
+		}
+		cfg.PublicHost = os.Getenv("MCP_PUBLIC_HOST")
 	}
 
 	cfg.ListenAddr = envOr("MCP_LISTEN_ADDR", ":8000")
-	cfg.PublicHost = os.Getenv("MCP_PUBLIC_HOST")
 	cfg.ReportsFile = os.Getenv("REPORTS_FILE")
 	cfg.AllowedModels = csv(os.Getenv("ODOO_ALLOWED_MODELS"))
 	cfg.BlockedModels = DefaultBlockedModels
@@ -107,6 +129,9 @@ func FromEnv() (*Config, error) {
 	cfg.OdooTimeout = time.Duration(timeout) * time.Second
 	return cfg, nil
 }
+
+// OAuth reports whether per-user sign-in is enabled.
+func (c *Config) OAuth() bool { return c.OAuthSecret != "" }
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

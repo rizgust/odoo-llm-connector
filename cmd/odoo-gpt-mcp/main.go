@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net"
@@ -10,13 +12,16 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	_ "time/tzdata" // users' Odoo timezones resolve even in minimal containers
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/rizgust/odoo-gpt-mcp/internal/config"
+	"github.com/rizgust/odoo-gpt-mcp/internal/oauth"
 	"github.com/rizgust/odoo-gpt-mcp/internal/odoo"
 	"github.com/rizgust/odoo-gpt-mcp/internal/policy"
 	"github.com/rizgust/odoo-gpt-mcp/internal/reports"
@@ -39,34 +44,47 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-
-	client := odoo.NewClient(cfg.OdooURL, cfg.OdooDB, cfg.OdooUser, cfg.OdooAPIKey, cfg.OdooTimeout)
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.OdooTimeout)
-	uid, err := client.UID(ctx)
-	cancel()
-	if err != nil {
-		return err
-	}
-	log.Info("connected to Odoo", "url", cfg.OdooURL, "db", cfg.OdooDB, "uid", uid)
-
 	catalog, err := reports.Load(cfg.ReportsFile)
 	if err != nil {
 		return err
 	}
 	pol := &policy.Policy{Allowed: cfg.AllowedModels, Blocked: cfg.BlockedModels, MaxTextLength: cfg.MaxTextLength}
-	checkReports(log, client, pol, catalog, cfg.OdooTimeout)
+	opts := tools.Options{Policy: pol, Catalog: catalog, DefaultLimit: cfg.DefaultLimit, MaxLimit: cfg.MaxLimit}
 
-	server := tools.NewServer(client, tools.Options{
-		Policy:       pol,
-		Catalog:      catalog,
-		KeepWarm:     true,
-		DefaultLimit: cfg.DefaultLimit,
-		MaxLimit:     cfg.MaxLimit,
-	}, version)
+	// The service account is required for shared mode; with OAuth it only runs the startup report check.
+	var client *odoo.Client
+	if cfg.OdooUser != "" && cfg.OdooAPIKey != "" {
+		client = odoo.NewClient(cfg.OdooURL, cfg.OdooDB, cfg.OdooUser, cfg.OdooAPIKey, cfg.OdooTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.OdooTimeout)
+		uid, err := client.UID(ctx)
+		cancel()
+		if err != nil {
+			return err
+		}
+		log.Info("connected to Odoo", "url", cfg.OdooURL, "db", cfg.OdooDB, "uid", uid)
+		checkReports(log, client, pol, catalog, cfg.OdooTimeout)
+	} else {
+		log.Info("no ODOO_USER/ODOO_API_KEY: skipping startup report check", "url", cfg.OdooURL, "db", cfg.OdooDB)
+	}
+
+	var handler http.Handler
+	if cfg.OAuth() {
+		as, err := oauth.New(cfg.PublicURL, cfg.OAuthSecret, oauth.OdooAuthenticator(cfg.OdooURL, cfg.OdooDB, cfg.OdooTimeout))
+		if err != nil {
+			return err
+		}
+		users := &userServers{cfg: cfg, opts: opts, servers: map[string]*mcp.Server{}}
+		handler = newOAuthHandler(cfg, as, users.get, log)
+		log.Info("per-user sign-in enabled", "endpoint", cfg.PublicURL+"/mcp")
+	} else {
+		opts.KeepWarm = true
+		handler = newHandler(cfg, tools.NewServer(client, opts, version), log)
+		log.Info("shared-account mode", "endpoint", "/mcp/<MCP_ACCESS_TOKEN>")
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           newHandler(cfg, server, log),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -79,11 +97,63 @@ func run(log *slog.Logger) error {
 		srv.Shutdown(ctx)
 	}()
 
-	log.Info("serving MCP", "addr", cfg.ListenAddr, "endpoint", "/mcp/<MCP_ACCESS_TOKEN>", "version", version)
+	log.Info("serving MCP", "addr", cfg.ListenAddr, "version", version)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// userServers keeps one MCP server per signed-in Odoo identity, so every tool call runs
+// with that user's own Odoo session, access rights and caches.
+type userServers struct {
+	cfg  *config.Config
+	opts tools.Options
+
+	mu      sync.Mutex
+	servers map[string]*mcp.Server
+}
+
+func (u *userServers) get(id oauth.Identity) *mcp.Server {
+	sum := sha256.Sum256([]byte(id.Login + "\x00" + id.APIKey))
+	key := hex.EncodeToString(sum[:])
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if s, ok := u.servers[key]; ok {
+		return s
+	}
+	client := odoo.NewClient(u.cfg.OdooURL, u.cfg.OdooDB, id.Login, id.APIKey, u.cfg.OdooTimeout)
+	s := tools.NewServer(client, u.opts, version)
+	u.servers[key] = s
+	return s
+}
+
+// newOAuthHandler routes the OAuth endpoints, /healthz, and the bearer-protected /mcp endpoint.
+func newOAuthHandler(cfg *config.Config, as *oauth.Server, serverFor func(oauth.Identity) *mcp.Server, log *slog.Logger) http.Handler {
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		id, ok := oauth.IdentityFrom(r)
+		if !ok {
+			return nil
+		}
+		return serverFor(id)
+	}, &mcp.StreamableHTTPOptions{
+		Stateless:                  true,
+		JSONResponse:               true,
+		Logger:                     log,
+		DisableLocalhostProtection: true, // checkHost below pins the public hostname instead
+	})
+	protected := auth.RequireBearerToken(as.Verifier(), &auth.RequireBearerTokenOptions{
+		ResourceMetadataURL: as.ResourceMetadataURL(),
+	})(mcpHandler)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+	as.Register(mux, "/mcp")
+	mux.Handle("/mcp", checkHost(cfg.PublicHost, protected))
+	return mux
 }
 
 // checkReports logs which catalog reports work against this database, so a wrong field

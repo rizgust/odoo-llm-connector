@@ -3,3 +3,4 @@
 /bin/
 .env
 /mapping/
+/deploy/odoo-gpt-mcp
